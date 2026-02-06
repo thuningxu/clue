@@ -1,0 +1,5 @@
+pynput>=1.7.6
+google-genai>=1.0.0
+Pillow>=10.0.0
+python-dotenv>=1.0.0
+pyobjc-framework-Quartz>=10.0
