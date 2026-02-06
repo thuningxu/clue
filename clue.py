@@ -12,12 +12,14 @@ import json
 import subprocess
 import tempfile
 import threading
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 import urllib.request
 from tkinter import scrolledtext
 from dotenv import load_dotenv
 from pynput import keyboard
+from PIL import Image, ImageTk
 
 # Load environment variables from .env file
 load_dotenv()
@@ -44,18 +46,39 @@ Be concise but thorough."""
 
 
 class NotificationWindow:
-    """Small notification toast in upper-right corner"""
+    """Small notification toast in upper-right corner with thumbnail"""
 
     def __init__(self, root):
         self.root = root
         self.window = None
+        self.thumbnail_ref = None  # Keep reference to prevent garbage collection
 
-    def show(self, message: str):
-        """Show notification"""
+    def show(self, message: str, image_path: str = None):
+        """Show notification with optional thumbnail"""
         if self.window is None:
             self._create_window()
 
         self.label.config(text=message)
+
+        # Show thumbnail if image path provided
+        if image_path and os.path.exists(image_path):
+            try:
+                img = Image.open(image_path)
+                # Scale to fit in thumbnail (max 120px height)
+                ratio = 80 / img.height
+                new_size = (int(img.width * ratio), 80)
+                img = img.resize(new_size, Image.Resampling.LANCZOS)
+                self.thumbnail_ref = ImageTk.PhotoImage(img)
+                self.thumbnail_label.config(image=self.thumbnail_ref)
+                self.thumbnail_label.pack(side=tk.LEFT, padx=(10, 0))
+                width = new_size[0] + 180
+            except Exception:
+                self.thumbnail_label.pack_forget()
+                width = 260
+        else:
+            self.thumbnail_label.pack_forget()
+            width = 260
+
         self.window.deiconify()
         self.window.lift()
         self.window.attributes('-topmost', True)
@@ -63,9 +86,9 @@ class NotificationWindow:
         # Position in upper-right corner
         self.window.update_idletasks()
         screen_w = self.root.winfo_screenwidth()
-        x = screen_w - 280
+        x = screen_w - width - 20
         y = 40
-        self.window.geometry(f'260x36+{x}+{y}')
+        self.window.geometry(f'{width}x100+{x}+{y}')
 
     def _create_window(self):
         """Create notification window"""
@@ -74,8 +97,16 @@ class NotificationWindow:
         self.window.configure(bg='#3a3a3a')
         self.window.attributes('-topmost', True)
 
+        # Container frame
+        container = tk.Frame(self.window, bg='#3a3a3a')
+        container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # Thumbnail label (initially hidden)
+        self.thumbnail_label = tk.Label(container, bg='#3a3a3a')
+
+        # Text label
         self.label = tk.Label(
-            self.window,
+            container,
             text="",
             font=('SF Pro Text', 11) if sys.platform == 'darwin' else ('Segoe UI', 9),
             bg='#3a3a3a',
@@ -83,7 +114,7 @@ class NotificationWindow:
             padx=12,
             pady=8
         )
-        self.label.pack(fill=tk.BOTH, expand=True)
+        self.label.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self.window.withdraw()
 
     def hide(self):
@@ -129,13 +160,13 @@ class ResponseWindow:
         y = (self.root.winfo_screenheight() // 3) - (height // 2)
         self.root.geometry(f'{width}x{height}+{x}+{y}')
 
-    def show_notification(self, message: str):
-        """Show a small notification toast"""
+    def show_notification(self, message: str, image_path: str = None):
+        """Show a small notification toast with optional thumbnail"""
         if self.root is None:
             self._create_window()
         if self.notification is None:
             self.notification = NotificationWindow(self.root)
-        self.notification.show(message)
+        self.notification.show(message, image_path)
 
     def _render_markdown(self, content: str):
         """Render markdown content with basic formatting"""
@@ -324,9 +355,12 @@ class ClueApp:
 
         # Get the frontmost window ID using CGWindowListCopyWindowInfo via Python
         # This is more reliable than AppleScript
-        get_window_script = '''
+        get_window_script = f'''
 import Quartz
 import sys
+import os
+
+my_pid = {os.getpid()}
 
 # Get list of windows, front to back
 options = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
@@ -336,8 +370,9 @@ window_list = Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID)
 for window in window_list:
     layer = window.get('kCGWindowLayer', 0)
     owner = window.get('kCGWindowOwnerName', '')
-    # Layer 0 is normal windows, skip system UI and our own app
-    if layer == 0 and owner not in ('Window Server', 'Clue', 'Terminal', 'Python'):
+    owner_pid = window.get('kCGWindowOwnerPID', 0)
+    # Layer 0 is normal windows, skip system UI and our own process
+    if layer == 0 and owner != 'Window Server' and owner_pid != my_pid:
         window_id = window.get('kCGWindowNumber')
         if window_id:
             print(window_id)
@@ -424,14 +459,17 @@ sys.exit(1)
                 image_path = self.capture_screenshot()
                 print(f"Screenshot saved to: {image_path}")
 
-                # Show small notification in upper-right
-                self.window.root.after(0, lambda: self.window.show_notification(
-                    "Screenshot captured. Analyzing..."
+                # Show small notification in upper-right with thumbnail
+                self.window.root.after(0, lambda p=image_path: self.window.show_notification(
+                    "Analyzing...", p
                 ))
 
                 # Analyze with AI
                 print(f"Sending to {self.backend} for analysis...")
+                start_time = time.time()
                 response = self.analyze_image(image_path)
+                elapsed = time.time() - start_time
+                print(f"Analysis completed in {elapsed:.2f}s")
 
                 # Show response (this also hides the notification)
                 self.window.root.after(0, lambda: self.window.show("Clue", response))

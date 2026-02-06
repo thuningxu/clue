@@ -54,6 +54,11 @@ Environment variables (set in `.env`):
 
 ## Usage
 
+You can override `.env` settings with command line variables:
+```bash
+CLUE_BACKEND=ollama ./run.sh
+```
+
 - **Cmd+Shift+F** - Capture active window and analyze
 - A small notification appears while analyzing
 - Response appears in a floating window
