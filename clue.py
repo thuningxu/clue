@@ -7,23 +7,34 @@ Press Cmd+Shift+S to capture screen and get AI analysis
 import os
 import sys
 import re
+import base64
+import json
 import subprocess
 import tempfile
 import threading
 import tkinter as tk
 import tkinter.font as tkfont
+import urllib.request
 from tkinter import scrolledtext
 from dotenv import load_dotenv
 from pynput import keyboard
-from google import genai
 
 # Load environment variables from .env file
 load_dotenv()
 
 # Configuration
 HOTKEY = '<cmd>+<shift>+f'
+
+# Backend: 'gemini' or 'ollama'
+BACKEND = os.environ.get('CLUE_BACKEND', 'gemini').lower()
+
+# Gemini settings
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
-MODEL_NAME = 'gemini-3-flash-preview'  # Using latest flash model
+GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-3-flash-preview')
+
+# Ollama settings
+OLLAMA_URL = os.environ.get('OLLAMA_URL', 'http://localhost:11434')
+OLLAMA_MODEL = os.environ.get('OLLAMA_MODEL', 'qwen3-vl:8b')
 
 # Default prompt - can be customized
 DEFAULT_PROMPT = """Analyze this screenshot and help me understand what I'm looking at.
@@ -282,14 +293,28 @@ class ClueApp:
     def __init__(self):
         self.window = ResponseWindow()
         self.hotkey_listener = None
+        self.backend = BACKEND
 
-        # Configure Gemini
-        if not GEMINI_API_KEY:
-            print("ERROR: GEMINI_API_KEY environment variable not set")
-            print("Please set it with: export GEMINI_API_KEY='your-api-key'")
+        if self.backend == 'gemini':
+            if not GEMINI_API_KEY:
+                print("ERROR: GEMINI_API_KEY environment variable not set")
+                print("Please set it with: export GEMINI_API_KEY='your-api-key'")
+                sys.exit(1)
+            from google import genai
+            self.genai = genai
+            self.client = genai.Client(api_key=GEMINI_API_KEY)
+        elif self.backend == 'ollama':
+            # Test Ollama connection
+            try:
+                req = urllib.request.Request(f"{OLLAMA_URL}/api/tags")
+                urllib.request.urlopen(req, timeout=5)
+            except Exception as e:
+                print(f"ERROR: Cannot connect to Ollama at {OLLAMA_URL}")
+                print(f"Make sure Ollama is running: ollama serve")
+                sys.exit(1)
+        else:
+            print(f"ERROR: Unknown backend '{self.backend}'. Use 'gemini' or 'ollama'")
             sys.exit(1)
-
-        self.client = genai.Client(api_key=GEMINI_API_KEY)
 
     def capture_screenshot(self) -> str:
         """Capture screenshot of active window using macOS screencapture"""
@@ -344,21 +369,50 @@ sys.exit(1)
         return path
 
     def analyze_image(self, image_path: str, prompt: str = DEFAULT_PROMPT) -> str:
+        """Send image to AI for analysis"""
+        if self.backend == 'gemini':
+            return self._analyze_gemini(image_path, prompt)
+        else:
+            return self._analyze_ollama(image_path, prompt)
+
+    def _analyze_gemini(self, image_path: str, prompt: str) -> str:
         """Send image to Gemini for analysis"""
-        # Read and encode image
         with open(image_path, 'rb') as f:
             image_data = f.read()
 
-        # Create image part for new API
-        image_part = genai.types.Part.from_bytes(data=image_data, mime_type='image/png')
+        image_part = self.genai.types.Part.from_bytes(data=image_data, mime_type='image/png')
 
-        # Generate response
         response = self.client.models.generate_content(
-            model=MODEL_NAME,
+            model=GEMINI_MODEL,
             contents=[prompt, image_part]
         )
 
         return response.text
+
+    def _analyze_ollama(self, image_path: str, prompt: str) -> str:
+        """Send image to Ollama for analysis"""
+        with open(image_path, 'rb') as f:
+            image_data = f.read()
+
+        image_b64 = base64.b64encode(image_data).decode('utf-8')
+
+        payload = {
+            "model": OLLAMA_MODEL,
+            "prompt": prompt,
+            "images": [image_b64],
+            "stream": False
+        }
+
+        req = urllib.request.Request(
+            f"{OLLAMA_URL}/api/generate",
+            data=json.dumps(payload).encode('utf-8'),
+            headers={'Content-Type': 'application/json'}
+        )
+
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            result = json.loads(resp.read().decode('utf-8'))
+
+        return result.get('response', 'No response from Ollama')
 
     def on_hotkey(self):
         """Handle hotkey press"""
@@ -376,7 +430,7 @@ sys.exit(1)
                 ))
 
                 # Analyze with AI
-                print("Sending to Gemini for analysis...")
+                print(f"Sending to {self.backend} for analysis...")
                 response = self.analyze_image(image_path)
 
                 # Show response (this also hides the notification)
@@ -397,11 +451,13 @@ sys.exit(1)
 
     def run(self):
         """Start the application"""
+        model = GEMINI_MODEL if self.backend == 'gemini' else OLLAMA_MODEL
         print("=" * 50)
         print("Clue - AI Screenshot Assistant")
         print("=" * 50)
+        print(f"Backend: {self.backend}")
+        print(f"Model: {model}")
         print(f"Hotkey: {HOTKEY}")
-        print(f"Model: {MODEL_NAME}")
         print("")
         print("Press Cmd+Shift+F to capture and analyze your screen")
         print("Press Ctrl+C to quit")
