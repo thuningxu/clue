@@ -21,7 +21,28 @@ Supports both Google Gemini (cloud) and Ollama (local) backends.
    ./run.sh
    ```
 
-### Option 2: Ollama (Local)
+### Option 2: Gauth (OAuth - No API costs)
+
+Use your Google account via OAuth (Antigravity). No API key charges.
+
+1. Set up gauth (one-time):
+   ```bash
+   cd ~/sd/gauth
+   ./run.sh --provider antigravity
+   ```
+
+2. Create a `.env` file:
+   ```
+   CLUE_BACKEND=gauth
+   GAUTH_MODEL=gemini-3-pro-image
+   ```
+
+3. Run:
+   ```bash
+   ./run.sh
+   ```
+
+### Option 3: Ollama (Local)
 
 1. Install [Ollama](https://ollama.ai) and pull a vision model:
    ```bash
@@ -46,9 +67,10 @@ Environment variables (set in `.env`):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CLUE_BACKEND` | `gemini` | Backend to use: `gemini` or `ollama` |
+| `CLUE_BACKEND` | `gemini` | Backend: `gemini`, `gauth`, or `ollama` |
 | `GEMINI_API_KEY` | - | API key for Gemini |
 | `GEMINI_MODEL` | `gemini-3-flash-preview` | Gemini model name |
+| `GAUTH_MODEL` | `gemini-3-pro-image` | Model for gauth backend |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama server URL |
 | `OLLAMA_MODEL` | `qwen3-vl:8b` | Ollama model name |
 

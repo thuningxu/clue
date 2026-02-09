@@ -16,6 +16,7 @@ import time
 import tkinter as tk
 import tkinter.font as tkfont
 import urllib.request
+import urllib.parse
 from tkinter import scrolledtext
 from dotenv import load_dotenv
 from pynput import keyboard
@@ -27,16 +28,22 @@ load_dotenv()
 # Configuration
 HOTKEY = '<cmd>+<shift>+f'
 
-# Backend: 'gemini' or 'ollama'
+# Backend: 'gemini', 'ollama', or 'gauth'
 BACKEND = os.environ.get('CLUE_BACKEND', 'gemini').lower()
 
-# Gemini settings
+# Gemini settings (API key)
 GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY', '')
 GEMINI_MODEL = os.environ.get('GEMINI_MODEL', 'gemini-3-flash-preview')
 
 # Ollama settings
 OLLAMA_URL = os.environ.get('OLLAMA_URL', 'http://localhost:11434')
 OLLAMA_MODEL = os.environ.get('OLLAMA_MODEL', 'qwen3-vl:8b')
+
+# Gauth settings (OAuth via Antigravity)
+GAUTH_CREDENTIALS_PATH = os.path.join(os.path.dirname(__file__), 'credentials.json')
+GAUTH_MODEL = os.environ.get('GAUTH_MODEL', 'gemini-3-pro-image')
+GAUTH_ENDPOINT = 'https://cloudcode-pa.googleapis.com'
+GAUTH_API_VERSION = 'v1internal'
 
 # Default prompt - can be customized
 DEFAULT_PROMPT = """Analyze this screenshot and help me understand what I'm looking at.
@@ -343,8 +350,20 @@ class ClueApp:
                 print(f"ERROR: Cannot connect to Ollama at {OLLAMA_URL}")
                 print(f"Make sure Ollama is running: ollama serve")
                 sys.exit(1)
+        elif self.backend == 'gauth':
+            # Load OAuth credentials from gauth
+            if not os.path.exists(GAUTH_CREDENTIALS_PATH):
+                print(f"ERROR: Gauth credentials not found at {GAUTH_CREDENTIALS_PATH}")
+                print("Please run 'cd ~/sd/gauth && ./run.sh --provider antigravity' to login first")
+                sys.exit(1)
+            try:
+                with open(GAUTH_CREDENTIALS_PATH, 'r') as f:
+                    self.gauth_credentials = json.load(f)
+            except Exception as e:
+                print(f"ERROR: Failed to load gauth credentials: {e}")
+                sys.exit(1)
         else:
-            print(f"ERROR: Unknown backend '{self.backend}'. Use 'gemini' or 'ollama'")
+            print(f"ERROR: Unknown backend '{self.backend}'. Use 'gemini', 'ollama', or 'gauth'")
             sys.exit(1)
 
     def capture_screenshot(self) -> str:
@@ -407,8 +426,10 @@ sys.exit(1)
         """Send image to AI for analysis"""
         if self.backend == 'gemini':
             return self._analyze_gemini(image_path, prompt)
-        else:
+        elif self.backend == 'ollama':
             return self._analyze_ollama(image_path, prompt)
+        else:
+            return self._analyze_gauth(image_path, prompt)
 
     def _analyze_gemini(self, image_path: str, prompt: str) -> str:
         """Send image to Gemini for analysis"""
@@ -448,6 +469,148 @@ sys.exit(1)
             result = json.loads(resp.read().decode('utf-8'))
 
         return result.get('response', 'No response from Ollama')
+
+    def _refresh_gauth_token(self) -> str:
+        """Refresh gauth access token if expired"""
+        current_time = int(time.time() * 1000)
+
+        if current_time < self.gauth_credentials.get('expires_at', 0):
+            return self.gauth_credentials['access_token']
+
+        # Token expired, refresh it
+        print("[DEBUG] Refreshing gauth token...")
+        refresh_token = self.gauth_credentials.get('refresh_token')
+        provider = self.gauth_credentials.get('provider', 'antigravity')
+
+        # Antigravity OAuth config
+        client_id = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+        client_secret = "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"
+
+        data = {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        }
+
+        req = urllib.request.Request(
+            "https://oauth2.googleapis.com/token",
+            data=urllib.parse.urlencode(data).encode('utf-8'),
+            headers={'Content-Type': 'application/x-www-form-urlencoded'}
+        )
+
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            tokens = json.loads(resp.read().decode('utf-8'))
+
+        # Update credentials
+        self.gauth_credentials['access_token'] = tokens['access_token']
+        self.gauth_credentials['expires_at'] = current_time + (tokens.get('expires_in', 3600) * 1000)
+
+        # Save updated credentials
+        with open(GAUTH_CREDENTIALS_PATH, 'w') as f:
+            json.dump(self.gauth_credentials, f, indent=2)
+
+        return tokens['access_token']
+
+    def _analyze_gauth(self, image_path: str, prompt: str) -> str:
+        """Send image to Gemini via gauth OAuth (Antigravity)"""
+        with open(image_path, 'rb') as f:
+            image_data = f.read()
+
+        image_b64 = base64.b64encode(image_data).decode('utf-8')
+        access_token = self._refresh_gauth_token()
+        project_id = self.gauth_credentials.get('project_id', 'rising-fact-p41fc')
+
+        # Build request payload for Code Assist API (Antigravity format)
+        request_id = f"clue-{int(time.time() * 1000)}"
+        session_id = f"clue-session-{int(time.time() * 1000)}"
+
+        payload = {
+            "model": GAUTH_MODEL,
+            "project": project_id,
+            "request": {
+                "contents": [{
+                    "role": "user",
+                    "parts": [
+                        {"text": prompt},
+                        {
+                            "inlineData": {
+                                "mimeType": "image/png",
+                                "data": image_b64
+                            }
+                        }
+                    ]
+                }],
+                "generationConfig": {
+                    "temperature": 0.7,
+                    "maxOutputTokens": 8192,
+                },
+                "sessionId": session_id,
+            },
+            "requestId": request_id,
+            # Antigravity-specific fields
+            "requestType": "agent",
+            "userAgent": "antigravity",
+        }
+
+        headers = {
+            "Authorization": f"Bearer {access_token}",
+            "Content-Type": "application/json",
+            "User-Agent": "antigravity/1.0 darwin/arm64",
+            "X-Goog-Api-Client": "google-cloud-sdk vscode_cloudshelleditor/0.1",
+            "Client-Metadata": json.dumps({
+                "ideType": "IDE_UNSPECIFIED",
+                "platform": "PLATFORM_UNSPECIFIED",
+                "pluginType": "GEMINI",
+            }),
+        }
+
+        url = f"{GAUTH_ENDPOINT}/{GAUTH_API_VERSION}:generateContent"
+
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode('utf-8'),
+            headers=headers
+        )
+
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            result = json.loads(resp.read().decode('utf-8'))
+
+        # Extract text from response (Code Assist wraps in "response" field)
+        inner = result.get('response', result)
+        candidates = inner.get('candidates', [])
+        if candidates:
+            parts = candidates[0].get('content', {}).get('parts', [])
+
+            # Separate thinking and response parts
+            thinking_parts = []
+            response_parts = []
+            for p in parts:
+                if p.get('thought') or p.get('thinking'):
+                    if 'text' in p:
+                        thinking_parts.append(p['text'])
+                elif 'text' in p:
+                    response_parts.append(p['text'])
+
+            # Log thinking first
+            if thinking_parts:
+                print("\n" + "=" * 50)
+                print("THINKING:")
+                print("=" * 50)
+                for t in thinking_parts:
+                    print(t)
+                print("=" * 50 + "\n")
+
+            # Then log response
+            response_text = '\n'.join(response_parts) if response_parts else 'No text in response'
+            print("\n" + "-" * 50)
+            print("RESPONSE:")
+            print("-" * 50)
+            print(response_text)
+            print("-" * 50 + "\n")
+
+            return response_text
+        return 'No response from model'
 
     def on_hotkey(self):
         """Handle hotkey press"""
@@ -489,7 +652,12 @@ sys.exit(1)
 
     def run(self):
         """Start the application"""
-        model = GEMINI_MODEL if self.backend == 'gemini' else OLLAMA_MODEL
+        if self.backend == 'gemini':
+            model = GEMINI_MODEL
+        elif self.backend == 'ollama':
+            model = OLLAMA_MODEL
+        else:
+            model = GAUTH_MODEL
         print("=" * 50)
         print("Clue - AI Screenshot Assistant")
         print("=" * 50)
